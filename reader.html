@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JM Reader</title>
+<style>
+  body { margin: 0; background: #111; font-family: system-ui; }
+  #toolbar { position: sticky; top: 0; background: #1a1a1a; padding: 8px 12px;
+             display: flex; gap: 8px; align-items: center; z-index: 10;
+             border-bottom: 1px solid #333; }
+  #toolbar select, #toolbar button { padding: 6px 12px; border-radius: 4px;
+    border: 1px solid #444; background: #222; color: #ddd; cursor: pointer; }
+  #toolbar button:hover { background: #333; }
+  #info { color: #888; font-size: 0.85em; margin-left: auto; }
+  #pages { display: flex; flex-direction: column; align-items: center;
+           padding: 12px 0; gap: 4px; }
+  #pages canvas { max-width: 100%; height: auto; display: block; }
+  .loading { color: #666; padding: 80px 0; text-align: center; }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <input type="text" id="jmidInput" placeholder="JM ID" value="350234" style="width:100px;padding:6px;border-radius:4px;border:1px solid #444;background:#222;color:#ddd;">
+  <button id="loadBtn">加载目录</button>
+  <select id="chapterSelect" disabled><option>-- 选择章节 --</option></select>
+  <button id="prevBtn" disabled>◀</button>
+  <button id="nextBtn" disabled>▶</button>
+  <span id="info"></span>
+</div>
+<div id="pages"><div class="loading">输入 JM ID 开始</div></div>
+
+<script>
+// ═══════════════════════════════════════════════════════
+// Config
+// ═══════════════════════════════════════════════════════
+
+const API_BASE = './';  // 同目录留空，跨域填完整 URL
+
+// ═══════════════════════════════════════════════════════
+// Image decoder (core)
+// ═══════════════════════════════════════════════════════
+
+function decodeImage(img, segments) {
+  if (segments === 0) {
+    const c = document.createElement('canvas');
+    c.width = img.width;
+    c.height = img.height;
+    c.getContext('2d').drawImage(img, 0, 0);
+    return c;
+  }
+
+  const w = img.width;
+  const h = img.height;
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+
+  const over = h % segments;
+  const moveBase = Math.floor(h / segments);
+
+  for (let i = 0; i < segments; i++) {
+    let move = moveBase;
+    const ySrc = h - (move * (i + 1)) - over;
+    let yDst = move * i;
+
+    if (i === 0) {
+      move += over;
+    } else {
+      yDst += over;
+    }
+
+    ctx.drawImage(img, 0, ySrc, w, move, 0, yDst, w, move);
+  }
+
+  return canvas;
+}
+
+// ═══════════════════════════════════════════════════════
+// API helpers
+// ═══════════════════════════════════════════════════════
+
+async function api(path) {
+  const res = await fetch(API_BASE + path);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const json = await res.json();
+  if (!json.success) throw new Error(json.error);
+  return json.data;
+}
+
+// ═══════════════════════════════════════════════════════
+// App state
+// ═══════════════════════════════════════════════════════
+
+let albumData = null;
+let currentChapter = null;
+
+// ═══════════════════════════════════════════════════════
+// Load catalog
+// ═══════════════════════════════════════════════════════
+
+async function loadCatalog(jmid) {
+  document.getElementById('pages').innerHTML = '<div class="loading">加载目录…</div>';
+
+  albumData = await api(`/?jmid=${jmid}`);
+
+  const sel = document.getElementById('chapterSelect');
+  sel.innerHTML = '';
+  albumData.chapters.forEach((ch, i) => {
+    const opt = document.createElement('option');
+    opt.value = ch.photo_id;
+    opt.textContent = `第${ch.sort}話 ${ch.title}`;
+    sel.appendChild(opt);
+  });
+  sel.disabled = false;
+  sel.onchange = () => loadChapter(sel.value);
+
+  document.getElementById('info').textContent =
+    `${albumData.album.name} · ${albumData.chapters_total} 章`;
+
+  // Load first chapter
+  if (albumData.chapters.length > 0) {
+    loadChapter(albumData.chapters[0].photo_id);
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// Load a chapter
+// ═══════════════════════════════════════════════════════
+
+async function loadChapter(photoId) {
+  const pagesDiv = document.getElementById('pages');
+  pagesDiv.innerHTML = '<div class="loading">加载图片…</div>';
+
+  document.getElementById('prevBtn').disabled = true;
+  document.getElementById('nextBtn').disabled = true;
+
+  try {
+    const data = await api(`/?jmid=${albumData.album.album_id}&chapter=${photoId}`);
+    currentChapter = data.chapters[0];
+
+    document.getElementById('chapterSelect').value = photoId;
+    document.getElementById('info').textContent =
+      `${albumData.album.name} · 第${currentChapter.sort}話 · ${currentChapter.page_count}P`;
+
+    // Render all pages
+    pagesDiv.innerHTML = '';
+    for (const img of currentChapter.images) {
+      const container = document.createElement('div');
+      container.className = 'loading';
+      container.textContent = `加载第 ${img.index} 页…`;
+      pagesDiv.appendChild(container);
+
+      // Load and decode
+      try {
+        const pic = await loadImage(img.url);
+
+        if (img.decode_segments === 0) {
+          // No scramble — draw directly
+          const c = document.createElement('canvas');
+          c.width = pic.width;
+          c.height = pic.height;
+          c.getContext('2d').drawImage(pic, 0, 0);
+          container.replaceWith(c);
+        } else {
+          // Decode
+          const decoded = decodeImage(pic, img.decode_segments);
+          container.replaceWith(decoded);
+        }
+      } catch (e) {
+        container.textContent = `第 ${img.index} 页加载失败: ${e.message}`;
+        container.style.color = '#c44';
+      }
+    }
+
+    // Navigation
+    const idx = albumData.chapters.findIndex(ch => ch.photo_id === photoId);
+    document.getElementById('prevBtn').disabled = idx <= 0;
+    document.getElementById('nextBtn').disabled = idx >= albumData.chapters.length - 1;
+    document.getElementById('prevBtn').onclick = () =>
+      loadChapter(albumData.chapters[idx - 1].photo_id);
+    document.getElementById('nextBtn').onclick = () =>
+      loadChapter(albumData.chapters[idx + 1].photo_id);
+
+  } catch (e) {
+    pagesDiv.innerHTML = `<div class="loading" style="color:#c44">加载失败: ${e.message}</div>`;
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// Image loader with CORS
+// ═══════════════════════════════════════════════════════
+
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Image load failed'));
+    img.src = url;
+  });
+}
+
+// ═══════════════════════════════════════════════════════
+// Init
+// ═══════════════════════════════════════════════════════
+
+document.getElementById('loadBtn').onclick = () => {
+  const jmid = document.getElementById('jmidInput').value.trim();
+  if (jmid) loadCatalog(jmid);
+};
+
+document.getElementById('jmidInput').onkeydown = (e) => {
+  if (e.key === 'Enter') loadCatalog(e.target.value.trim());
+};
+</script>
+</body>
+</html>
